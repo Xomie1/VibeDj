@@ -1,0 +1,202 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Vibe DJ</title>
+<link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;700&display=swap" rel="stylesheet">
+<style>
+  :root {
+    --bg: #0d0d12; --panel: #17171f; --line: #262632; --text: #ecebf3; --muted: #8b8a9b;
+    --accent: #c6ff3d; --accent-ink: #11140a; --warm: #ff7a59;
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--text); font-family: "Space Grotesk", system-ui, sans-serif; }
+  main { max-width: 560px; margin: 0 auto; padding: 28px 16px 60px; }
+  h1 { font-size: 15px; letter-spacing: .18em; text-transform: uppercase; color: var(--muted); margin: 0 0 22px; }
+  h1 b { color: var(--accent); }
+  .search { display: flex; gap: 8px; }
+  input { flex: 1; background: var(--panel); border: 1px solid var(--line); color: var(--text);
+          padding: 12px 14px; border-radius: 10px; font: inherit; }
+  button { font: inherit; cursor: pointer; border: 1px solid var(--line); background: var(--panel);
+           color: var(--text); padding: 10px 14px; border-radius: 10px; }
+  button.primary { background: var(--accent); color: var(--accent-ink); border-color: var(--accent); font-weight: 700; }
+  button:disabled { opacity: .4; cursor: default; }
+  #results { margin-top: 8px; }
+  .row { display: flex; gap: 10px; align-items: center; padding: 8px; border-radius: 8px; cursor: pointer; }
+  .row:hover { background: var(--panel); }
+  .row img, .row .ph { width: 40px; height: 40px; border-radius: 6px; object-fit: cover; background: var(--line); flex: none; }
+  .row .t { font-size: 14px; } .row .a { font-size: 12px; color: var(--muted); }
+  .now { margin-top: 26px; background: var(--panel); border: 1px solid var(--line); border-radius: 16px; padding: 18px; display: none; }
+  .now.on { display: block; }
+  .cover { width: 100%; aspect-ratio: 1; border-radius: 12px; object-fit: cover; background: linear-gradient(135deg, #2a2a38, #15151c); }
+  .title { font-size: 22px; font-weight: 700; margin: 14px 0 2px; }
+  .artist { color: var(--muted); }
+  .reason { margin-top: 10px; font-size: 13px; color: var(--accent); min-height: 1em; }
+  .chips { display: flex; gap: 6px; margin-top: 10px; flex-wrap: wrap; }
+  .chip { font-size: 12px; padding: 4px 9px; border-radius: 99px; border: 1px solid var(--line); color: var(--muted); }
+  .bar { height: 4px; background: var(--line); border-radius: 4px; margin-top: 16px; overflow: hidden; }
+  .bar i { display: block; height: 100%; width: 0; background: var(--accent); }
+  .controls { display: flex; gap: 8px; margin-top: 14px; }
+  .controls button { flex: 1; }
+  .vibe { display: flex; margin-top: 14px; border: 1px solid var(--line); border-radius: 10px; overflow: hidden; }
+  .vibe button { flex: 1; border: 0; border-radius: 0; background: transparent; color: var(--muted); }
+  .vibe button.sel { background: var(--line); color: var(--text); }
+  .history { margin-top: 26px; }
+  .history h2 { font-size: 12px; letter-spacing: .14em; text-transform: uppercase; color: var(--muted); font-weight: 500; }
+  .tag { margin-left: auto; font-size: 11px; color: var(--muted); }
+  .tag.skip { color: var(--warm); } .tag.like { color: var(--accent); }
+  .empty { color: var(--muted); font-size: 14px; margin-top: 10px; }
+</style>
+</head>
+<body>
+<main>
+  <h1><b>●</b> Vibe DJ</h1>
+
+  <div class="search">
+    <input id="q" placeholder="Start from a song, artist, genre or mood">
+    <button class="primary" id="surprise">Surprise me</button>
+  </div>
+  <div id="results"></div>
+
+  <section class="now" id="now">
+    <img class="cover" id="cover" alt="">
+    <div class="title" id="title"></div>
+    <div class="artist" id="artist"></div>
+    <div class="reason" id="reason"></div>
+    <div class="chips" id="chips"></div>
+    <div class="bar"><i id="prog"></i></div>
+    <div class="controls">
+      <button id="play">Pause</button>
+      <button id="like">♥ Like</button>
+      <button id="skip">Skip ›</button>
+    </div>
+    <div class="vibe" id="vibe">
+      <button data-v="down">Wind down</button>
+      <button data-v="hold" class="sel">Hold</button>
+      <button data-v="up">Turn up</button>
+    </div>
+  </section>
+
+  <section class="history" id="historyWrap" hidden>
+    <h2>Played this session</h2>
+    <div id="history"></div>
+  </section>
+</main>
+
+<audio id="audio" preload="auto"></audio>
+
+<script>
+const $ = (id) => document.getElementById(id);
+const audio = $("audio");
+let session = null, current = null, upNext = null, fetching = false, liked = false;
+
+async function api(path, body) {
+  const r = await fetch(path, body === undefined ? {} : {
+    method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body)
+  });
+  if (!r.ok) throw new Error((await r.json().catch(() => ({}))).detail || r.statusText);
+  return r.json();
+}
+
+function row(t, extra = "") {
+  const img = t.artwork ? `<img src="${t.artwork}" alt="">` : `<div class="ph"></div>`;
+  const d = document.createElement("div");
+  d.className = "row";
+  d.innerHTML = `${img}<div><div class="t"></div><div class="a"></div></div>${extra}`;
+  d.querySelector(".t").textContent = t.title;
+  d.querySelector(".a").textContent = [t.artist, t.genre].filter(Boolean).join(" · ");
+  return d;
+}
+
+// ---- search / start ----
+let timer;
+$("q").addEventListener("input", () => {
+  clearTimeout(timer);
+  const q = $("q").value.trim();
+  if (!q) { $("results").innerHTML = ""; return; }
+  timer = setTimeout(async () => {
+    const res = await api(`/api/search?q=${encodeURIComponent(q)}&limit=8`);
+    $("results").innerHTML = res.length ? "" : `<div class="empty">Nothing in the catalogue for that yet.</div>`;
+    res.forEach(t => { const r = row(t); r.onclick = () => start(t.id); $("results").appendChild(r); });
+  }, 250);
+});
+$("surprise").onclick = () => start(null);
+
+async function start(seedId) {
+  try {
+    const res = await api("/api/sessions", { seed_track_id: seedId });
+    session = res.session_id; upNext = null;
+    $("results").innerHTML = ""; $("q").value = ""; $("history").innerHTML = "";
+    play(res.track);
+  } catch (e) { alert(e.message); }
+}
+
+// ---- playback ----
+function play(t) {
+  current = t; liked = false;
+  audio.src = t.stream_url;
+  audio.play().catch(() => {});
+  $("now").classList.add("on");
+  $("cover").src = t.artwork || "";
+  $("title").textContent = t.title;
+  $("artist").textContent = t.artist;
+  $("reason").textContent = t.reason || "";
+  $("chips").innerHTML = "";
+  [t.bpm && `${Math.round(t.bpm)} BPM`, t.key, t.energy != null && `energy ${Math.round(t.energy * 100)}`, t.genre]
+    .filter(Boolean).forEach(c => { const s = document.createElement("span"); s.className = "chip"; s.textContent = c; $("chips").appendChild(s); });
+  $("like").textContent = "♥ Like";
+  $("play").textContent = "Pause";
+}
+
+async function fetchNext() {
+  if (fetching || upNext) return;
+  fetching = true;
+  try { upNext = (await api(`/api/sessions/${session}/next`, {})).track; }
+  catch (e) { console.warn(e); }
+  fetching = false;
+}
+
+async function advance(outcome) {
+  if (!current) return;
+  const done = current;
+  if (liked) outcome = "like";
+  api(`/api/sessions/${session}/event`, { track_id: done.id, outcome, listened_sec: audio.currentTime || 0 }).catch(() => {});
+  addHistory(done, outcome === "skip" && audio.currentTime < 30 ? "skip" : (liked ? "like" : ""));
+  if (!upNext) await fetchNext();
+  const n = upNext; upNext = null;
+  if (n) play(n);
+}
+
+function addHistory(t, tag) {
+  $("historyWrap").hidden = false;
+  const r = row(t, `<span class="tag ${tag}">${tag === "skip" ? "skipped" : tag === "like" ? "liked" : ""}</span>`);
+  $("history").prepend(r);
+}
+
+audio.addEventListener("timeupdate", () => {
+  if (!audio.duration) return;
+  $("prog").style.width = `${(audio.currentTime / audio.duration) * 100}%`;
+  if (audio.duration - audio.currentTime < 20) fetchNext();   // pick the next track early, no gap
+});
+audio.addEventListener("ended", () => advance(liked ? "like" : "complete"));
+audio.addEventListener("error", () => advance("skip"));          // unplayable track, move on
+
+$("skip").onclick = () => advance("skip");
+$("play").onclick = () => {
+  if (audio.paused) { audio.play(); $("play").textContent = "Pause"; }
+  else { audio.pause(); $("play").textContent = "Play"; }
+};
+$("like").onclick = () => { liked = true; $("like").textContent = "♥ Liked"; };
+$("vibe").addEventListener("click", async (e) => {
+  const v = e.target.dataset.v; if (!v || !session) return;
+  [...$("vibe").children].forEach(b => b.classList.toggle("sel", b.dataset.v === v));
+  if (upNext) {     // throw away the prefetched pick, re-pick with the new direction
+    api(`/api/sessions/${session}/event`, { track_id: upNext.id, outcome: "dropped" }).catch(() => {});
+    upNext = null;
+  }
+  await api(`/api/sessions/${session}/vibe`, { vibe: v });
+});
+</script>
+</body>
+</html>
