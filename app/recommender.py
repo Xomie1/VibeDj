@@ -9,6 +9,11 @@ Why components + learned weights instead of one big model?
   - works with zero training data on day one
   - every pick is explainable ("same key, +4 BPM, slightly more energy")
   - the skip signal has something concrete to learn from
+
+Sessions play in sections, like Spotify's DJ: themed blocks of 4 to 6 tracks
+(genre + energy band). When a section runs out, the next one starts on the
+closest-sounding different theme, so the move is smooth. "Switch it up" jumps
+to a theme far from what's playing.
 """
 from __future__ import annotations
 
@@ -37,6 +42,10 @@ SKIP_THRESHOLD_SEC = 30.0   # bailing before this counts as a skip
 CONTEXT_LEN = 5             # how many recent tracks define the vibe
 DECAY = 0.6                 # most recent track matters most
 
+SECTION_LEN = (4, 6)        # tracks per section, inclusive
+SWITCH_FAR_QUANTILE = 0.4   # a switch picks from the 40% of tracks least like what's playing
+BAND_LABELS = {"low": "Chilled", "mid": "Warm", "high": "Peak-time"}
+
 
 def bpm_fit(a: float | None, b: float | None) -> float:
     """1.0 for matching tempo, falls off past ~6%. Half/double time counts as a match."""
@@ -47,10 +56,34 @@ def bpm_fit(a: float | None, b: float | None) -> float:
 
 
 @dataclass
+class Section:
+    """A themed block of tracks."""
+    genre: str | None
+    band: str            # energy band, relative to the catalogue: 'low' | 'mid' | 'high'
+    length: int          # tracks to play before moving on
+    kind: str = "start"  # how it began: 'start' | 'next' | 'switch'
+
+    @property
+    def label(self) -> str:
+        return f"{BAND_LABELS[self.band]} {self.genre or 'mix'}"
+
+
+@dataclass
 class SessionState:
     played: list[dict] = field(default_factory=list)    # tracks that stuck (completed / liked / playing)
     skipped: list[dict] = field(default_factory=list)
     vibe: str = "hold"                                   # 'up' | 'down' | 'hold'
+    section: Section | None = None                       # None: one continuous flow, no sections
+    section_played: list[dict] = field(default_factory=list)   # played tracks in the current section
+    section_served: int = 0                              # tracks served in the current section, skips included
+
+
+@dataclass
+class Pick:
+    track: dict
+    components: dict
+    propensity: float                # chance this track was the one sampled; logged for off-policy learning
+    section: Section | None = None   # set when this pick opens a new section
 
 
 class Recommender:
@@ -69,6 +102,33 @@ class Recommender:
         else:
             self.V = np.zeros((0, 1), np.float32)
             self.pop = np.zeros(0)
+        # Energy depends on how loud tracks are mastered, so bands are thirds of
+        # this catalogue rather than fixed cut-offs.
+        es = [t["energy"] for t in tracks if t.get("energy") is not None]
+        self.energy_cuts = tuple(np.quantile(es, [1 / 3, 2 / 3])) if es else (1 / 3, 2 / 3)
+
+    # ---- sections --------------------------------------------------------
+    def band(self, track: dict) -> str:
+        e = track.get("energy")
+        if e is None:
+            return "mid"
+        lo, hi = self.energy_cuts
+        return "low" if e < lo else "mid" if e < hi else "high"
+
+    def theme(self, track: dict) -> tuple[str | None, str]:
+        return track.get("genre"), self.band(track)
+
+    def new_section(self, track: dict, kind: str, rng: np.random.Generator | None = None) -> Section:
+        """A section themed on `track`, which opens it."""
+        rng = rng or np.random.default_rng()
+        genre, band = self.theme(track)
+        return Section(genre, band, int(rng.integers(SECTION_LEN[0], SECTION_LEN[1] + 1)), kind)
+
+    def in_section(self, track: dict, sec: Section) -> bool:
+        # Genre only, so "turn up" / "wind down" can still move the energy mid-section.
+        if sec.genre:
+            return track.get("genre") == sec.genre
+        return self.band(track) == sec.band
 
     # ---- context ---------------------------------------------------------
     def context_vector(self, recent: list[dict]) -> np.ndarray | None:
@@ -92,15 +152,23 @@ class Recommender:
         return float(np.clip(last + step, 0.0, 1.0))
 
     # ---- scoring ---------------------------------------------------------
-    def components(self, state: SessionState) -> tuple[np.ndarray, list[int]]:
-        """Return (n_candidates x n_components) matrix and candidate indices."""
+    def unseen(self, state: SessionState) -> list[int]:
         seen = {t["id"] for t in state.played} | {t["id"] for t in state.skipped}
-        cand = [i for i, t in enumerate(self.tracks) if t["id"] not in seen]
+        return [i for i, t in enumerate(self.tracks) if t["id"] not in seen]
+
+    def components(self, state: SessionState, cand: list[int] | None = None,
+                   context: list[dict] | None = None) -> tuple[np.ndarray, list[int]]:
+        """Return (n_candidates x n_components) matrix and candidate indices.
+
+        `cand` limits the candidates (default: everything not played yet), `context`
+        sets which tracks define "the sound so far" (default: recent plays).
+        """
+        cand = self.unseen(state) if cand is None else cand
         if not cand:
             return np.zeros((0, len(COMPONENTS))), []
 
         last = state.played[-1] if state.played else None
-        ctx = self.context_vector(state.played)
+        ctx = self.context_vector(state.played if context is None else context)
         tgt_e = self.target_energy(state)
         recent_artists = {t.get("artist_id") or t.get("artist") for t in state.played[-3:]}
         recent_genres = [t.get("genre") for t in state.played[-CONTEXT_LEN:] if t.get("genre")]
@@ -132,20 +200,72 @@ class Recommender:
         w = np.array([self.weights[c] for c in COMPONENTS])
         return X @ w + self.weights["bias"]
 
-    def next_track(self, state: SessionState, temperature: float = 0.15, top_k: int = 10,
-                   rng: np.random.Generator | None = None) -> tuple[dict, dict] | None:
-        """Pick the next track. Samples from the top-k so it doesn't play the same set every time."""
-        X, cand = self.components(state)
+    def next_track(self, state: SessionState, switch: bool = False, temperature: float = 0.15,
+                   top_k: int = 10, rng: np.random.Generator | None = None) -> Pick | None:
+        """Pick the next track. Samples from the top-k so it doesn't play the same set every time.
+
+        With a section on the state, picks stay on its theme until it has served its
+        length; then the pick opens a new section on the closest different theme.
+        switch=True opens a new section far from what's playing.
+        """
+        rng = rng or np.random.default_rng()
+        unseen = self.unseen(state)
+        sec = state.section
+        kind = None
+        if switch:
+            kind = "switch"
+        elif sec is not None:
+            in_sec = [i for i in unseen if self.in_section(self.tracks[i], sec)]
+            if state.section_served >= sec.length or not in_sec:
+                kind = "next"
+
+        if kind == "switch":
+            pools, context = self._far_pools(state, unseen), state.played
+        elif kind == "next":
+            other = [i for i in unseen if self.theme(self.tracks[i]) != (sec.genre, sec.band)]
+            pools, context = [other, unseen], state.played   # smooth on from the last section
+        elif sec is not None:
+            pools, context = [in_sec], state.section_played or state.played
+        else:
+            pools, context = [unseen], state.played
+
+        for pool in pools:
+            pick = self._sample(state, pool, context, temperature, top_k, rng)
+            if pick:
+                break
+        else:
+            return None
+        if kind:
+            pick.section = self.new_section(pick.track, kind, rng)
+        return pick
+
+    def _far_pools(self, state: SessionState, unseen: list[int]) -> list[list[int]]:
+        """Candidates for a switch: another genre, and the least like what's playing."""
+        cur = state.section.genre if state.section else (state.played[-1].get("genre") if state.played else None)
+        other = [i for i in unseen if not cur or self.tracks[i].get("genre") != cur]
+        ctx = self.context_vector(state.played)
+
+        def farthest(pool: list[int]) -> list[int]:
+            if ctx is None or not pool:
+                return pool
+            sims = self.V[pool] @ ctx
+            cut = np.quantile(sims, SWITCH_FAR_QUANTILE)
+            return [i for i, s in zip(pool, sims) if s <= cut]
+
+        return [farthest(other), farthest(unseen)]   # one-genre catalogue: just the farthest sound
+
+    def _sample(self, state: SessionState, cand: list[int], context: list[dict], temperature: float,
+                top_k: int, rng: np.random.Generator) -> Pick | None:
+        X, cand = self.components(state, cand, context)
         if not cand:
             return None
         s = self.score(X)
         top = np.argsort(-s)[:top_k]
         p = np.exp((s[top] - s[top].max()) / max(temperature, 1e-6))
         p /= p.sum()
-        rng = rng or np.random.default_rng()
-        pick = int(rng.choice(top, p=p))
-        comps = {c: round(float(v), 4) for c, v in zip(COMPONENTS, X[pick])}
-        return self.tracks[cand[pick]], comps
+        j = int(rng.choice(len(top), p=p))
+        comps = {c: round(float(v), 4) for c, v in zip(COMPONENTS, X[top[j]])}
+        return Pick(self.tracks[cand[top[j]]], comps, round(float(p[j]), 6))
 
     # ---- learning from skips --------------------------------------------
     def learn(self, comps: dict, liked: bool) -> None:

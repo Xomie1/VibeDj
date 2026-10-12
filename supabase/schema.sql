@@ -30,9 +30,21 @@ create table if not exists plays (
     session_id text references sessions(id),
     track_id text references tracks(id),
     ts timestamptz default now(),
-    outcome text,
+    outcome text,                 -- queued | skip | complete | like | switch | dropped
     listened_sec real,
-    components jsonb
+    components jsonb,
+    section integer,              -- sections.n this play belongs to
+    propensity real               -- chance the recommender picked it, for off-policy learning
+);
+
+create table if not exists sections (
+    session_id text references sessions(id),
+    n integer,
+    genre text, band text,        -- theme: genre + energy band (low | mid | high)
+    length integer,
+    kind text,                    -- start | next | switch
+    started_at timestamptz default now(),
+    primary key (session_id, n)
 );
 
 create table if not exists weights (

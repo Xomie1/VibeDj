@@ -55,6 +55,15 @@ saved, so it gets better over time.
 **Vibe control.** "Turn up" / "Wind down" pushes the target energy up or down
 a notch per track. "Hold" keeps it steady.
 
+**Sections.** Like Spotify's DJ, a session plays in themed blocks of 4 to 6
+tracks. A theme is a genre plus an energy band (Chilled / Warm / Peak-time,
+split into thirds of your catalogue). Picks stay in the section's genre; when the
+section is done, the next one starts on the closest-sounding *different* theme,
+so the move is smooth. "Switch it up" jumps straight to a section in another
+genre, picked from the 40% of those tracks that sound least like what's playing. Every pick
+also logs the probability it was chosen with, so later we can evaluate and train
+the picker off-policy (the way Spotify's BaRT does).
+
 ## Setup
 
 ```bash
@@ -99,8 +108,9 @@ Open http://localhost:8000.
 |---|---|---|
 | GET | `/api/search?q=` | search the local catalogue |
 | POST | `/api/sessions` | `{seed_track_id?}` starts a session, returns first track |
-| POST | `/api/sessions/{id}/next` | next pick + reason + scoring components |
-| POST | `/api/sessions/{id}/event` | `{track_id, outcome: skip/complete/like/dropped, listened_sec}` |
+| POST | `/api/sessions/{id}/next` | next pick + reason + scoring components; `track.section` = `{n, label, kind, position, length}` |
+| POST | `/api/sessions/{id}/switch` | "Switch it up": next pick opens a new section far from the current one |
+| POST | `/api/sessions/{id}/event` | `{track_id, outcome: skip/complete/like/switch/dropped, listened_sec}` |
 | POST | `/api/sessions/{id}/vibe` | `{vibe: up/down/hold}` |
 | GET | `/api/stats` | catalogue counts, Audius keys loaded, current learned weights |
 | POST | `/api/admin/reload` | reload catalogue after ingesting |

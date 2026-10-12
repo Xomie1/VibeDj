@@ -30,7 +30,11 @@
   .now { margin-top: 26px; background: var(--panel); border: 1px solid var(--line); border-radius: 16px; padding: 18px; display: none; }
   .now.on { display: block; }
   .cover { width: 100%; aspect-ratio: 1; border-radius: 12px; object-fit: cover; background: linear-gradient(135deg, #2a2a38, #15151c); }
-  .title { font-size: 22px; font-weight: 700; margin: 14px 0 2px; }
+  .section { margin-top: 14px; font-size: 12px; letter-spacing: .14em; text-transform: uppercase; color: var(--accent); min-height: 1em; }
+  .section span { color: var(--muted); }
+  .section.new { animation: pop .9s ease-out; }
+  @keyframes pop { from { opacity: 0; transform: translateY(-4px); } to { opacity: 1; transform: none; } }
+  .title { font-size: 22px; font-weight: 700; margin: 6px 0 2px; }
   .artist { color: var(--muted); }
   .reason { margin-top: 10px; font-size: 13px; color: var(--accent); min-height: 1em; }
   .chips { display: flex; gap: 6px; margin-top: 10px; flex-wrap: wrap; }
@@ -42,6 +46,7 @@
   .vibe { display: flex; margin-top: 14px; border: 1px solid var(--line); border-radius: 10px; overflow: hidden; }
   .vibe button { flex: 1; border: 0; border-radius: 0; background: transparent; color: var(--muted); }
   .vibe button.sel { background: var(--line); color: var(--text); }
+  button.switch { width: 100%; margin-top: 10px; border-color: var(--accent); color: var(--accent); background: transparent; }
   .history { margin-top: 26px; }
   .history h2 { font-size: 12px; letter-spacing: .14em; text-transform: uppercase; color: var(--muted); font-weight: 500; }
   .tag { margin-left: auto; font-size: 11px; color: var(--muted); }
@@ -61,6 +66,7 @@
 
   <section class="now" id="now">
     <img class="cover" id="cover" alt="">
+    <div class="section" id="section"></div>
     <div class="title" id="title"></div>
     <div class="artist" id="artist"></div>
     <div class="reason" id="reason"></div>
@@ -76,6 +82,7 @@
       <button data-v="hold" class="sel">Hold</button>
       <button data-v="up">Turn up</button>
     </div>
+    <button class="switch" id="switch">⇄ Switch it up</button>
   </section>
 
   <section class="history" id="historyWrap" hidden>
@@ -89,7 +96,8 @@
 <script>
 const $ = (id) => document.getElementById(id);
 const audio = $("audio");
-let session = null, current = null, upNext = null, fetching = false, liked = false;
+let session = null, current = null, upNext = null, pending = null, liked = false;
+let gen = 0;   // bumped when the vibe, section or session changes, so stale prefetches get dropped
 
 async function api(path, body) {
   const r = await fetch(path, body === undefined ? {} : {
@@ -126,7 +134,7 @@ $("surprise").onclick = () => start(null);
 async function start(seedId) {
   try {
     const res = await api("/api/sessions", { seed_track_id: seedId });
-    session = res.session_id; upNext = null;
+    session = res.session_id; upNext = null; gen++;
     $("results").innerHTML = ""; $("q").value = ""; $("history").innerHTML = "";
     play(res.track);
   } catch (e) { alert(e.message); }
@@ -142,6 +150,15 @@ function play(t) {
   $("title").textContent = t.title;
   $("artist").textContent = t.artist;
   $("reason").textContent = t.reason || "";
+  const s = t.section, sec = $("section");
+  sec.innerHTML = "";
+  if (s) {
+    sec.textContent = s.label + " ";
+    const pos = document.createElement("span");
+    pos.textContent = `· ${s.position} of ${s.length}`;
+    sec.appendChild(pos);
+    if (s.position === 1) { sec.classList.remove("new"); void sec.offsetWidth; sec.classList.add("new"); }
+  }
   $("chips").innerHTML = "";
   [t.bpm && `${Math.round(t.bpm)} BPM`, t.key, t.energy != null && `energy ${Math.round(t.energy * 100)}`, t.genre]
     .filter(Boolean).forEach(c => { const s = document.createElement("span"); s.className = "chip"; s.textContent = c; $("chips").appendChild(s); });
@@ -149,12 +166,20 @@ function play(t) {
   $("play").textContent = "Pause";
 }
 
-async function fetchNext() {
-  if (fetching || upNext) return;
-  fetching = true;
-  try { upNext = (await api(`/api/sessions/${session}/next`, {})).track; }
-  catch (e) { console.warn(e); }
-  fetching = false;
+function fetchNext() {
+  if (upNext) return Promise.resolve();
+  if (!pending) {
+    const g = gen, s = session;
+    pending = api(`/api/sessions/${s}/next`, {})
+      .then(res => { if (g === gen) upNext = res.track; else drop(s, res.track); })
+      .catch(e => console.warn(e))
+      .finally(() => { pending = null; });
+  }
+  return pending;   // callers wait for an in-flight fetch instead of finding nothing queued
+}
+
+function drop(s, t) {   // a prefetched pick we won't play; tell the server so it isn't counted
+  api(`/api/sessions/${s}/event`, { track_id: t.id, outcome: "dropped" }).catch(() => {});
 }
 
 async function advance(outcome) {
@@ -170,7 +195,8 @@ async function advance(outcome) {
 
 function addHistory(t, tag) {
   $("historyWrap").hidden = false;
-  const r = row(t, `<span class="tag ${tag}">${tag === "skip" ? "skipped" : tag === "like" ? "liked" : ""}</span>`);
+  const label = { skip: "skipped", like: "liked", switch: "switched" }[tag] || "";
+  const r = row(t, `<span class="tag ${tag}">${label}</span>`);
   $("history").prepend(r);
 }
 
@@ -191,12 +217,24 @@ $("like").onclick = () => { liked = true; $("like").textContent = "♥ Liked"; }
 $("vibe").addEventListener("click", async (e) => {
   const v = e.target.dataset.v; if (!v || !session) return;
   [...$("vibe").children].forEach(b => b.classList.toggle("sel", b.dataset.v === v));
-  if (upNext) {     // throw away the prefetched pick, re-pick with the new direction
-    api(`/api/sessions/${session}/event`, { track_id: upNext.id, outcome: "dropped" }).catch(() => {});
-    upNext = null;
-  }
+  gen++;            // throw away the prefetched pick, re-pick with the new direction
+  if (upNext) { drop(session, upNext); upNext = null; }
   await api(`/api/sessions/${session}/vibe`, { vibe: v });
 });
+
+$("switch").onclick = async () => {   // like Spotify's DJ button: jump to a different section now
+  if (!session || !current) return;
+  $("switch").disabled = true;
+  gen++;
+  if (upNext) { drop(session, upNext); upNext = null; }
+  const done = current, outcome = liked ? "like" : "switch";
+  try {
+    await api(`/api/sessions/${session}/event`, { track_id: done.id, outcome, listened_sec: audio.currentTime || 0 });
+    addHistory(done, outcome);
+    play((await api(`/api/sessions/${session}/switch`, {})).track);
+  } catch (e) { alert(e.message); }
+  $("switch").disabled = false;
+};
 </script>
 </body>
 </html>

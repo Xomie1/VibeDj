@@ -32,9 +32,19 @@ CREATE TABLE IF NOT EXISTS plays (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     session_id TEXT, track_id TEXT,
     ts REAL,
-    outcome TEXT,                     -- 'queued' | 'skip' | 'complete' | 'like'
+    outcome TEXT,                     -- 'queued' | 'skip' | 'complete' | 'like' | 'switch' | 'dropped'
     listened_sec REAL,
-    components TEXT                   -- JSON feature vector the recommender scored it with
+    components TEXT,                  -- JSON feature vector the recommender scored it with
+    section INTEGER,                  -- sections.n this play belongs to
+    propensity REAL                   -- chance the recommender picked it; for off-policy learning later
+);
+CREATE TABLE IF NOT EXISTS sections (
+    session_id TEXT, n INTEGER,
+    genre TEXT, band TEXT,            -- the theme: genre + energy band ('low' | 'mid' | 'high')
+    length INTEGER,                   -- tracks planned for this section
+    kind TEXT,                        -- 'start' | 'next' | 'switch'
+    started_at REAL,
+    PRIMARY KEY (session_id, n)
 );
 CREATE TABLE IF NOT EXISTS weights (
     name TEXT PRIMARY KEY,
@@ -52,6 +62,15 @@ class DB:
         self.conn = sqlite3.connect(str(path), check_same_thread=False)
         self.conn.row_factory = sqlite3.Row
         self.conn.executescript(SCHEMA)
+        self._migrate()
+
+    def _migrate(self) -> None:
+        """Add columns that databases created by older versions are missing."""
+        cols = {r["name"] for r in self.conn.execute("PRAGMA table_info(plays)")}
+        for name, typ in (("section", "INTEGER"), ("propensity", "REAL")):
+            if name not in cols:
+                self.conn.execute(f"ALTER TABLE plays ADD COLUMN {name} {typ}")
+        self.conn.commit()
 
     # ---- tracks ----------------------------------------------------------
     def upsert_track(self, t: dict) -> None:
@@ -129,10 +148,13 @@ class DB:
         r = self.conn.execute("SELECT * FROM sessions WHERE id=?", (sid,)).fetchone()
         return dict(r) if r else None
 
-    def log_queued(self, sid: str, track_id: str, components: dict | None) -> int:
+    def log_queued(self, sid: str, track_id: str, components: dict | None,
+                   section: int | None = None, propensity: float | None = None) -> int:
         cur = self.conn.execute(
-            "INSERT INTO plays (session_id, track_id, ts, outcome, components) VALUES (?,?,?,?,?)",
-            (sid, track_id, time.time(), "queued", json.dumps(components) if components else None),
+            "INSERT INTO plays (session_id, track_id, ts, outcome, components, section, propensity) "
+            "VALUES (?,?,?,?,?,?,?)",
+            (sid, track_id, time.time(), "queued", json.dumps(components) if components else None,
+             section, propensity),
         )
         self.conn.commit()
         return cur.lastrowid
@@ -152,9 +174,28 @@ class DB:
 
     def history(self, sid: str) -> list[dict]:
         rows = self.conn.execute(
-            "SELECT track_id, outcome, listened_sec FROM plays WHERE session_id=? ORDER BY ts", (sid,)
+            "SELECT track_id, outcome, listened_sec, section FROM plays WHERE session_id=? ORDER BY ts", (sid,)
         )
         return [dict(r) for r in rows]
+
+    # ---- sections --------------------------------------------------------
+    def start_section(self, sid: str, sec) -> int:
+        """Store a new section (a recommender.Section) for the session, return its number."""
+        n = self.conn.execute(
+            "SELECT COALESCE(MAX(n), 0) + 1 FROM sections WHERE session_id=?", (sid,)
+        ).fetchone()[0]
+        self.conn.execute(
+            "INSERT INTO sections (session_id, n, genre, band, length, kind, started_at) VALUES (?,?,?,?,?,?,?)",
+            (sid, n, sec.genre, sec.band, sec.length, sec.kind, time.time()),
+        )
+        self.conn.commit()
+        return n
+
+    def current_section(self, sid: str) -> dict | None:
+        r = self.conn.execute(
+            "SELECT n, genre, band, length, kind FROM sections WHERE session_id=? ORDER BY n DESC LIMIT 1", (sid,)
+        ).fetchone()
+        return dict(r) if r else None
 
     # ---- learned weights -------------------------------------------------
     def load_weights(self, name: str = "global") -> dict | None:
