@@ -63,7 +63,8 @@ def index():
 
 @app.get("/api/stats")
 def stats():
-    return {**db.count(), "weights": {k: round(v, 3) for k, v in rec.weights.items()}}
+    return {**db.count(), "audius_keys": audius.pool.configured,
+            "weights": {k: round(v, 3) for k, v in rec.weights.items()}}
 
 
 @app.get("/api/search")

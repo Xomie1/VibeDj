@@ -4,6 +4,7 @@ Run:  pytest -q
 """
 import os
 import tempfile
+from urllib.parse import parse_qs, urlsplit
 
 import numpy as np
 import pytest
@@ -125,7 +126,9 @@ def test_api_end_to_end(monkeypatch):
     assert s["track"]["id"] == "1-0"
 
     nxt = c.post(f"/api/sessions/{sid}/next").json()
-    assert "reason" in nxt["track"] and nxt["track"]["stream_url"].endswith("app_name=vibe-dj")
+    assert "reason" in nxt["track"]
+    stream_qs = parse_qs(urlsplit(nxt["track"]["stream_url"]).query)
+    assert stream_qs["app_name"] == ["vibe-dj"]
     r = c.post(f"/api/sessions/{sid}/event", json={"track_id": nxt["track"]["id"], "outcome": "skip", "listened_sec": 5}).json()
     assert r["learned"] is False
     assert c.post(f"/api/sessions/{sid}/vibe", json={"vibe": "up"}).json()["ok"]

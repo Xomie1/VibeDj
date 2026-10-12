@@ -60,8 +60,16 @@ a notch per track. "Hold" keeps it steady.
 ```bash
 python -m venv .venv && source .venv/bin/activate   # Windows: .venv\Scripts\activate
 pip install -r requirements.txt
-cp .env.example .env    # optional: add a free Audius bearer token for higher limits
+cp .env.example .env    # optional: add free Audius API keys for higher limits
 ```
+
+Each key from https://api.audius.co/plans has its own rate limit (free plan:
+10 req/s, 500k req/month). Put as many pairs as you like in `.env`
+(`AUDIUS_API_KEY_1` + `AUDIUS_BEARER_TOKEN_1`, `_2`, `_3`...) and the client
+rotates through them, one key per request. A key that gets rate limited (429)
+or refused (401) sits out for a while and the next one takes over. Only the
+public API key reaches the browser; bearer tokens stay on the server.
+`GET /api/stats` shows how many keys were loaded.
 
 You need ffmpeg installed for mp3 decoding if your libsndfile is old
 (`brew install ffmpeg` / `sudo apt install ffmpeg` / `winget install ffmpeg`).
@@ -94,7 +102,7 @@ Open http://localhost:8000.
 | POST | `/api/sessions/{id}/next` | next pick + reason + scoring components |
 | POST | `/api/sessions/{id}/event` | `{track_id, outcome: skip/complete/like/dropped, listened_sec}` |
 | POST | `/api/sessions/{id}/vibe` | `{vibe: up/down/hold}` |
-| GET | `/api/stats` | catalogue counts + current learned weights |
+| GET | `/api/stats` | catalogue counts, Audius keys loaded, current learned weights |
 | POST | `/api/admin/reload` | reload catalogue after ingesting |
 
 ## Tests

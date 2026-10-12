@@ -11,7 +11,8 @@ voice/text requests) without Spotify's data or licences.
 - Tests: `pytest -q` (synthetic catalogue, no network)
 
 ## Layout
-- `app/audius.py`: REST client for https://api.audius.co/v1. Optional bearer token in `.env`.
+- `app/audius.py`: REST client for https://api.audius.co/v1. Rotates through the API key + bearer token pairs in `.env`
+  (`AUDIUS_API_KEY_n` / `AUDIUS_BEARER_TOKEN_n`), resting keys that hit 429/401. Bearer tokens never go in browser URLs.
 - `app/features.py`: librosa analysis, BPM / Camelot key / energy / brightness / percussive + 25-d timbre vector.
 - `app/keys.py`: key parsing, Camelot wheel compatibility.
 - `app/recommender.py`: component scoring (sim, bpm, key, energy, genre, fresh_artist, skip_sim, popularity), softmax top-k sampling, online logistic regression on skip/complete/like.

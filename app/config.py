@@ -1,5 +1,6 @@
 """Settings, read from environment / .env."""
 import os
+import re
 from pathlib import Path
 
 try:
@@ -11,9 +12,26 @@ except ImportError:
 ROOT = Path(__file__).resolve().parent.parent
 
 AUDIUS_API_BASE = os.getenv("AUDIUS_API_BASE", "https://api.audius.co/v1")
-# Free key from https://api.audius.co/plans. Optional, but gives higher rate limits.
-AUDIUS_BEARER_TOKEN = os.getenv("AUDIUS_BEARER_TOKEN", "")
 AUDIUS_APP_NAME = os.getenv("AUDIUS_APP_NAME", "vibe-dj")
+
+
+def audius_credentials(env=os.environ) -> list[tuple[str, str]]:
+    """(api_key, bearer_token) pairs from AUDIUS_API_KEY_1 / AUDIUS_BEARER_TOKEN_1, _2, _3...
+
+    Free keys from https://api.audius.co/plans. Each has its own rate limit, so the
+    client rotates through all of them. The unnumbered AUDIUS_API_KEY /
+    AUDIUS_BEARER_TOKEN still work as one more pair.
+    """
+    pairs = {}
+    for name, value in env.items():
+        m = re.fullmatch(r"AUDIUS_(API_KEY|BEARER_TOKEN)(?:_(\d+))?", name)
+        if m and value.strip():
+            n = int(m.group(2)) if m.group(2) else 0
+            pairs.setdefault(n, {})[m.group(1)] = value.strip()
+    return [(p.get("API_KEY", ""), p.get("BEARER_TOKEN", "")) for _, p in sorted(pairs.items())]
+
+
+AUDIUS_CREDENTIALS = audius_credentials()
 
 DB_PATH = Path(os.getenv("VIBE_DB_PATH", ROOT / "data" / "vibe.db"))
 
